@@ -333,8 +333,9 @@ final class HomeData {
      */
     boolean isNight(long now) {
         String theme = Prefs.theme();
-        if (theme.equals("dark")) return true;
-        if (theme.equals("light")) return false;
+        // Moi is a deliberate pair of permanent palettes, not an automatic inversion at sunrise or sunset.
+        if (theme.equals("dark") || theme.equals("moi-dark")) return true;
+        if (theme.equals("light") || theme.equals("moi-light")) return false;
         long t = Shaders.timeOfDay(now, 0);
         long rise = Shaders.timeOfDay(weather.sunrise, 6 * 60 * 60_000L);
         long set = Shaders.timeOfDay(weather.sunset, 18 * 60 * 60_000L);

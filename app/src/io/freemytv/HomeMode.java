@@ -191,6 +191,52 @@ final class HomeMode {
         ModeJob.schedule(c, ModeJob.REVERT, null, 0);
     }
 
+    /** Starts the TV's recorded Ambient Mode from the root of Moi; its original dream is restored when Home resumes. */
+    static void requestOriginalAmbient(Context c) {
+        if (FREE.equals(state(c).optString("mode"))) ModeJob.schedule(c, ModeJob.AMBIENT, null, 0);
+    }
+
+    /** Applies the independent Ambient Mode choice from Settings without changing the selected home screen. */
+    static void requestScreensaver(Context c) {
+        ModeJob.schedule(c, ModeJob.SCREENSAVER, null, 0);
+    }
+
+    /** Called when the ambient dream closes, before Free My TV checks its mode again. */
+    static void restoreFreeDreamAfterAmbient(Context c) {
+        if (state(c).optBoolean("ambientOriginal")) ModeJob.schedule(c, ModeJob.AMBIENT_RESTORE, null, 0);
+    }
+
+    /** Selects either the TV's original Ambient Mode or Free My TV's own saver, enables idle ambient, then previews it. */
+    static void applyScreensaverChoiceNow(Context app) {
+        synchronized (RUN) {
+            JSONObject s = state(app);
+            if (!FREE.equals(s.optString("mode"))) return;
+            try (Adb adb = connect(app, s)) {
+                if (usesSystemAmbient()) {
+                    String dream = originalDream(s);
+                    if (dream.isEmpty()) dream = defaultDream(adb);
+                    String pkg = packageOf(dream);
+                    if (pkg == null || pkg.equals(PKG)) {
+                        notice(app, Ui.tr("The TV's original ambient mode was not recorded yet."));
+                        return;
+                    }
+                    adb.shell("pm enable " + pkg);
+                    adb.shell("settings put secure screensaver_components " + dream);
+                    s.put("originalDream", dream);
+                } else {
+                    adb.shell("settings put secure screensaver_components " + DREAM);
+                }
+                // This only enables Ambient Mode; the TV's own Settings still decide how many idle minutes it waits.
+                adb.shell("settings put secure screensaver_enabled 1");
+                save(app, s);
+                String result = startDream(adb);
+                if (!result.isEmpty()) AppLog.w("screensaver preview: " + result);
+            } catch (Exception e) {
+                notice(app, Ui.trf("Couldn't change the screensaver: {error}", "error", e.getMessage()));
+            }
+        }
+    }
+
     /** After the TV boots (and after a TV update): wait for the system to settle and check Free My TV mode. */
     static void bootCheck(Context c) {
         ensureRemoteService(c, 30_000);
@@ -217,6 +263,64 @@ final class HomeMode {
             remoteService(app, adb, true);
         } catch (IOException e) {
             AppLog.w("remote buttons service: " + e.getMessage());
+        }
+    }
+
+    /**
+     * The original dream was recorded before Free My TV took over.  It is normally disabled in Free mode, so re-enable
+     * only that package, select its validated component, and ask Android's DreamManager to start it.  This never
+     * changes the Home role or Google Photos account; when the dream is dismissed, HomeActivity restores our dream.
+     */
+    static void startOriginalAmbientNow(Context app) {
+        synchronized (RUN) {
+            JSONObject s = state(app);
+            if (!FREE.equals(s.optString("mode"))) return;
+            try (Adb adb = connect(app, s)) {
+                // Back from Moi previews whichever idle background the person selected in Settings.
+                if (!usesSystemAmbient()) {
+                    adb.shell("settings put secure screensaver_components " + DREAM);
+                    startDream(adb);
+                    return;
+                }
+                // Some TVs only expose their Ambient/Google Photos component as the system default.  This is common
+                // when Free My TV was installed after the first setup, so no earlier mode switch could record it.
+                String dream = originalDream(s);
+                if (dream.isEmpty()) {
+                    dream = defaultDream(adb);
+                    if (!dream.isEmpty()) {
+                        s.put("originalDream", dream);
+                        save(app, s);
+                    }
+                }
+                String pkg = packageOf(dream);
+                if (pkg == null || pkg.equals(PKG)) {
+                    notice(app, Ui.tr("The TV's original ambient mode was not recorded yet."));
+                    return;
+                }
+                adb.shell("pm enable " + pkg);
+                adb.shell("settings put secure screensaver_components " + dream);
+                String result = startDream(adb);
+                if (!result.isEmpty()) AppLog.w("original ambient start: " + result);
+                s.put("ambientOriginal", true);
+                save(app, s);
+            } catch (Exception e) {
+                notice(app, Ui.trf("Couldn't start the original ambient mode: {error}", "error", e.getMessage()));
+            }
+        }
+    }
+
+    /** Returns Free My TV's dream after ambient mode, except Moi deliberately leaves the TV's own ambient choice alone. */
+    static void restoreFreeDreamNow(Context app) {
+        synchronized (RUN) {
+            JSONObject s = state(app);
+            if (!s.optBoolean("ambientOriginal") || !FREE.equals(s.optString("mode"))) return;
+            try (Adb adb = connect(app, s)) {
+                if (!usesSystemAmbient()) adb.shell("settings put secure screensaver_components " + DREAM);
+                s.remove("ambientOriginal");
+                save(app, s);
+            } catch (Exception e) {
+                AppLog.w("could not restore Free My TV screensaver after ambient mode: " + e.getMessage());
+            }
         }
     }
 
@@ -310,19 +414,25 @@ final class HomeMode {
             Watchdog.clear(c);
             check(adb.shell("cmd package set-home-activity " + HOME_ACTIVITY), "Success",
                     Ui.tr("Android didn't accept the new home screen"));
-            adb.shell("settings put secure screensaver_components " + DREAM);
+            if (!usesSystemAmbient()) adb.shell("settings put secure screensaver_components " + DREAM);
             JSONObject started = state(c);
             started.put("mode", FREE).put("homeReverted", false).put("setupHome", setupHome);
             save(c, started);
-            List<String> targets = targets(home, dream, setupHome);
+            // A system Ambient Mode is a first-class user choice.  Do not include its service in the apps to disable.
+            List<String> targets = targets(home, usesSystemAmbient() ? "" : dream, setupHome);
             Set<String> disabled = new HashSet<>(stringList(state(c), "disabled"));
             Set<String> present = packages(adb, "");
+            String ambientPkg = usesSystemAmbient() ? packageOf(dream) : null;
+            if (ambientPkg != null && present.contains(ambientPkg)) {
+                adb.shell("pm enable " + ambientPkg);
+                disabled.remove(ambientPkg);
+            }
             Set<String> keptOff = new HashSet<>(stringList(state(c), "keptOff"));
             // Off now and not on our list: the person turned it off, unless an earlier install of Free My TV did (its
             // list lives in the TV's settings too, since an uninstall erases our state file).
             Set<String> ours = recorded(adb);
             for (String pkg : packages(adb, "-d")) {
-                if (targets(home, dream, true).contains(pkg) && !disabled.contains(pkg) && !ours.contains(pkg)) keptOff.add(pkg);
+                if (targets(home, usesSystemAmbient() ? "" : dream, true).contains(pkg) && !disabled.contains(pkg) && !ours.contains(pkg)) keptOff.add(pkg);
             }
             keptOff.removeAll(ours);
             JSONObject before = state(c);
@@ -562,16 +672,24 @@ final class HomeMode {
                 }
                 Set<String> wanted = new HashSet<>(stringList(s, "disabled"));
                 String dream = originalDream(s);
+                if (dream.isEmpty() && usesSystemAmbient()) dream = defaultDream(adb);
+                String ambientPkg = usesSystemAmbient() ? packageOf(dream) : null;
                 // In the switch's order (Google TV's setup app before its home screen), then the rest.
                 List<String> order = new ArrayList<>();
-                for (String pkg : targets(home, dream, s.optBoolean("setupHome", true))) {
+                for (String pkg : targets(home, usesSystemAmbient() ? "" : dream, s.optBoolean("setupHome", true))) {
                     if (!reverted || !(pkg.equals(homePkg) || pkg.equals(GOOGLE_SETUP) || pkg.equals(packageOf(dream)))) {
                         wanted.add(pkg);
                         order.add(pkg);
                     }
                 }
+                if (ambientPkg != null) wanted.remove(ambientPkg);
                 for (String pkg : sorted(wanted)) if (!order.contains(pkg)) order.add(pkg);
                 Set<String> disabled = new HashSet<>(stringList(s, "disabled"));
+                if (ambientPkg != null && present.contains(ambientPkg)) {
+                    adb.shell("pm enable " + ambientPkg);
+                    disabledNow.remove(ambientPkg);
+                    disabled.remove(ambientPkg);
+                }
                 // Off before Free My TV: turned off again if a TV update brings one back, but never handed to
                 // Original to turn on.
                 List<String> keptOff = stringList(s, "keptOff");
@@ -619,7 +737,9 @@ final class HomeMode {
                     fixed.add(Ui.tr("the home screen"));
                 }
                 // Whole component names: ".ScreensaverAlone" (Android 11) contains ".Screensaver" (12 and newer).
-                if (!reverted && !Arrays.asList(adb.shell("settings get secure screensaver_components").trim().split(",")).contains(DREAM)) {
+                // The user's Ambient Mode choice is independent from their selected launcher theme.
+                if (!reverted && !usesSystemAmbient()
+                        && !Arrays.asList(adb.shell("settings get secure screensaver_components").trim().split(",")).contains(DREAM)) {
                     adb.shell("settings put secure screensaver_components " + DREAM);
                     fixed.add(Ui.tr("the screensaver"));
                 }
@@ -720,6 +840,30 @@ final class HomeMode {
 
     private static String originalDream(JSONObject s) {
         return safeComponent(s.optString("originalDream", ""));
+    }
+
+    /**
+     * Starts the selected Dream across Android TV generations. Newer builds expose DreamManager as `cmd dreams`;
+     * older Sony/Android TV builds expose the same system action through SystemUI's Somnambulator activity. A handful
+     * of vendor images keep the pre-standard `cmd dream` alias as a final fallback.
+     */
+    private static String startDream(Adb adb) throws IOException {
+        String result = adb.shell("cmd dreams start-dreaming").trim();
+        if (!dreamCommandUnavailable(result)) return result;
+        result = adb.shell("am start -n com.android.systemui/.Somnambulator").trim();
+        if (!result.contains("Error type") && !result.contains("does not exist")) return result;
+        result = adb.shell("cmd dream start-dream").trim();
+        return result;
+    }
+
+    private static boolean dreamCommandUnavailable(String result) {
+        return result.contains("No shell command implementation") || result.contains("Can't find service")
+                || result.contains("Unknown command");
+    }
+
+    /** The launcher theme never decides the idle background: Settings does. */
+    private static boolean usesSystemAmbient() {
+        return Prefs.originalScreensaver();
     }
 
     // Nested classes ("Outer$Inner") are valid; every shell command that takes one quotes it, so $ stays literal.

@@ -145,6 +145,19 @@
                 android:resource="@xml/remote_key_service" />
         </service>
 
+        <!-- Optional, explicit access chosen in Android's own settings.  It lets the bell show notifications that
+             other TV apps have posted; Free My TV never enables this access itself. -->
+        <service
+            android:name=".DeviceNotificationService"
+            android:process=":home"
+            android:exported="false"
+            android:label="Free My TV notifications"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <receiver
             android:name=".HomeReceiver"
             android:exported="false">

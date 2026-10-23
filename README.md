@@ -136,11 +136,20 @@ On the TV: *Free My TV* → *Home Screen* → *Original*. The factory home scree
 
 To remove it for good, switch to *Original* first, then uninstall *Free My TV* (Settings → Apps). Uninstalled it while it was on? Install it again and pick *Original*: the list of what it turned off is kept in the TV's settings, so everything comes back.
 
+## Screensaver and Ambient Mode
+
+The home screen and the idle background are separate choices. In *Free My TV* → *Screensaver*, choose either:
+
+- **TV ambient mode** — the TV's own saver, such as Google Photos. Free My TV re-enables its service when needed and leaves it enabled, so it starts automatically after the idle delay you set in the TV's Settings.
+- **Free My TV** — the app's glass clock and photo screensaver.
+
+The TV's Settings still control the idle delay, whether Ambient Mode is enabled, and the Google Photos album. Pressing Back at the root of a Moi home screen starts the selected screensaver right away.
+
 ## What it changes
 
-- It becomes the home screen and the screensaver.
+- It becomes the home screen. Its own screensaver is the default, but the person can instead keep the TV's original Ambient Mode (including Google Photos).
 - It turns off, without uninstalling:
-  - the stock home screen and screensaver;
+  - the stock home screen and its screensaver only when *Free My TV* is selected as the screensaver;
   - Google TV's recovery home, Play Games and YouTube Music;
   - on TCL TVs, the TCL Channel, messages, store demo, hotel menu, manuals, mirroring and logging apps;
   - on Philco TVs, AI PONT (promo channels and app downloads) and the manual;
@@ -175,6 +184,18 @@ It's your code, and Claude Code finds its way around it. Try:
 - *"Show the prices in euros."*
 - *"Add Catalan."*
 - *"Switch to the night look an hour after sunset."*
+
+### Moi dashboard themes
+
+**Moi Dark** and **Moi Light** are two permanent dashboard themes for people who prefer a launchpad to the standard
+editorial home screen. Pick either in *Free My TV → Home Settings → Theme*.
+
+- **Moi Dark** uses a deep blue-smoke glass surface with warm-white focus, intended for a dim room.
+- **Moi Light** uses translucent milky glass, ink-blue type and a blue focus ring, intended for a bright room.
+
+Both keep the same remote navigation: weather and the next six hours on the left, a fixed 5-column app grid on the
+right, inputs below, and Settings, Notifications and TV Settings in the upper-right. A focused app rises, gains a
+clear rim and reveals its name; labels have their own vertical lane so they never collide with the next row.
 
 ## How it works
 

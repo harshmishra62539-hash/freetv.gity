@@ -21,6 +21,7 @@ import android.media.tv.TvInputManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.os.UserHandle;
 import android.text.Layout;
 import android.text.StaticLayout;
@@ -99,6 +100,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final float L_PLATTER_TOP = 814, L_TILE_H = 126;
     private static final float L_DATE_BASE = 330, L_CLOCK_BASE = 540, L_WEATHER_BASE = 626, L_QUOTES_BASE = 694;
     private static final int L_INK = 0xFF1D1D1F, L_DIM = 0xFF6E6E73, L_FAINT = 0xFF8E8E93;
+    // Moi Dark: a 30 / 70 dashboard. Weather is a single left card; apps use the right panel rather than a dock.
+    private static final float MOI_LEFT = 80, MOI_WIDGET_R = 610, MOI_APPS_L = 650, MOI_R = 1840;
+    private static final float MOI_TOP = 214, MOI_BOTTOM = 824, MOI_APPS_BOTTOM = 824, MOI_APPS_TOP = 300;
+    // Inputs are a simple, left-aligned rail below the dashboard.  They intentionally have no enclosing card: on a TV
+    // that extra container reads as an empty box when only a few HDMI ports are in use.
+    private static final float MOI_INPUT_TITLE = 874, MOI_INPUT_TOP = 894, MOI_INPUT_H = 112;
+    private static final int MOI_COLUMNS = 5;
     private static String[] tabs;
     private static int tabsGeneration = -1;
     private static final String[] TAB_KIND = {null, "movie", "tv"};
@@ -148,6 +156,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private final RectF[] cardRects = new RectF[3];
     private final List<HomeApps.Item> lightButtons = new ArrayList<>();
     private Paint lTitle, lTab, lTabOn, lCardTitle, lCardMeta, lQuote, lTip, lDate, lClock, lWeather, lClockQuote;
+    private Paint moiTime, moiDate, moiSection;
     private Shader lightGradient;
 
     // Shelf
@@ -219,8 +228,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private final Spring sheet = new Spring(0.38f, 0.9f, 0);
     private final Spring scroll = new Spring(0.34f, 1f, 0);
     private final RectF focusedCell = new RectF();
-    private boolean sheetOpen, shelfEdited;
-    private int gridIndex;
+    private boolean sheetOpen, shelfEdited, notificationsSheet;
+    private List<DeviceNotifications.Entry> deviceNotifications = new ArrayList<>();
+    private int gridIndex, notificationIndex;
     private long toggledAt;
 
     // Toasts
@@ -485,6 +495,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** The round buttons at the top right (Settings > Top Buttons), with their names in the current language. */
     private void setLightButtons(List<HomeApps.Item> list) {
+        if (moi()) list = HomeApps.moiTopButtons();
         lightButtons.clear();
         lightButtons.addAll(list);
         if (zone == Z_TOP && topIndex >= 3 + lightButtons.size()) {
@@ -529,13 +540,15 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     @Override protected void onMeasure(int widthSpec, int heightSpec) {
         int width = MeasureSpec.getSize(widthSpec), height = MeasureSpec.getSize(heightSpec);
         float kk = width / 1920f;
+        boolean moi = moi();
         measure(sky, width, height);
-        measure(heroLayer, width, Math.round(790 * kk));
+        // Moi Dark owns the central dashboard, so its weather and three app rows stay inside unclipped layers.
+        measure(heroLayer, width, moi ? height : Math.round(790 * kk));
         measure(status, Math.round(1160 * kk), Math.round(240 * kk));
         // Sized to what they draw (the glass and its shadow; the grown tiles and their shadows): smaller layers are
         // cheaper for the GPU to composite on every frame of the drawer animation.
         measure(platter, width, Math.round(320 * kk));
-        measure(tiles, width, Math.round(270 * kk));
+        measure(tiles, width, moi ? height : Math.round(270 * kk));
         measure(drawerLayer, width, Math.round(600 * kk));
         measure(sheetLayer, width, height);
         measure(toastLayer, Math.round(1000 * kk), Math.round(220 * kk));
@@ -553,7 +566,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         place(heroLayer, 0, 0);
         place(status, width - status.getMeasuredWidth(), 0);
         place(platter, 0, Math.round(750 * kk));
-        place(tiles, 0, Math.round(790 * kk));
+        place(tiles, 0, moi() ? 0 : Math.round(790 * kk));
         place(drawerLayer, 0, Math.round(470 * kk));
         sheetLayer.layout(0, 0, width, height);
         sheetLayer.setPivotX(width / 2f);
@@ -611,6 +624,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lClock.setLetterSpacing(-0.01f);
         lWeather = Ui.text(Ui.medium, 34 * k, L_DIM);
         lClockQuote = Ui.numbers(Ui.medium, 28 * k, L_DIM);
+        moiTime = Ui.numbers(Ui.semibold, 46 * k, 0xFFF7FAFF);
+        moiDate = Ui.text(Ui.medium, 25 * k, 0xB9CBD5E9);
+        moiSection = Ui.text(Ui.semibold, 30 * k, 0xFFF4F7FC);
         lightGradient = null;
         buttonPaint = Ui.text(Ui.semibold, 29 * k, INK);
         capsuleText = Ui.numbers(Ui.medium, 29 * k, 0xF2FFFFFF);
@@ -685,8 +701,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         // glass shows the background where it ended up.
         if (tilesMoving || tilesDirty) tiles.invalidate();
         if (statusMoving || statusDirty || bgFading) status.invalidate();
-        if (heroMoving || heroDirty || heroFading) heroLayer.invalidate();
-        if (drawerItemsMoving || drawerDirty || bgFading) drawerLayer.invalidate();
+        if (heroMoving || heroDirty || heroFading || (moi() && (drawerItemsMoving || drawerDirty))) heroLayer.invalidate();
+        if (!moi() && (drawerItemsMoving || drawerDirty || bgFading)) drawerLayer.invalidate();
         if (gridMoving || gridDirty) sheetLayer.invalidate();
         if (drawerMoving || bgFading) sky.invalidate();
         if (bgFading || (drawerWasMoving && !drawerMoving)) platter.invalidate();
@@ -1127,6 +1143,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         wake();
         cancelReorder(true);    // the list changed under the move (an app installed or removed)
         tileShaders = new LinearGradient[0];
+        // The dashboard reserves its last cell for the existing pageable app library. This keeps the home surface
+        // focused while still making every installed app reachable with one press.
+        if (moi()) {
+            list = new ArrayList<>(list);
+            list.add(HomeApps.allApps());
+        }
         boolean same = list.size() == shelf.size();
         for (int i = 0; same && i < list.size(); i++) same = list.get(i).key.equals(shelf.get(i).key);
         shelf = list;
@@ -1149,6 +1171,28 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void layoutShelf() {
         int n = shelf.size();
+        if (moi()) {
+            float panelW = (MOI_R - MOI_APPS_L) * k;
+            // A compact five-by-four grid leaves a permanent, visible rail for Inputs below it.  Card positions stay
+            // fixed as apps are added, while the 16:9 size remains comfortable from a sofa even on a 55-inch screen.
+            // A deliberately generous horizontal rhythm and a dedicated text lane make this a grid, not a cramped
+            // collection of app banners.  The 125 px row pitch includes both the 16:9 art and its focused label.
+            float gap = 36 * k, tw = 172 * k;
+            float gridW = MOI_COLUMNS * tw + (MOI_COLUMNS - 1) * gap;
+            float x = MOI_APPS_L * k + (panelW - gridW) / 2f, y = MOI_APPS_TOP * k;
+            float th = tw * 9f / 16f;
+            for (int i = 0; i < n; i++) {
+                int col = i % MOI_COLUMNS, row = i / MOI_COLUMNS;
+                // This is a real grid, not a shelf: every cell has a stable address.  A short last row begins in
+                // column one, so apps never recenter or appear to drift when an app is added or removed.
+                // Each row owns a label lane. The focused name never lands on the next row of apps.
+                float left = x + col * (tw + gap), top = y + row * 125 * k;
+                tileRects[i].set(left, top, left + tw, top + th);
+            }
+            platterRect.setEmpty();
+            crispLogos.clear();
+            return;
+        }
         float pad = SHELF_PAD * k, gap = TILE_GAP * k;
         float full = (CONTENT_R - MARGIN) * k;
         // Tiles in the TV banners' own 16:9, so an app's art is never stretched; never taller than L_TILE_H. The glass
@@ -1168,7 +1212,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** Shelf layer: the glass bar and its shadow (it only changes with the background). */
     private void drawPlatter(Canvas c) {
-        if (shelf.isEmpty()) return;
+        if (moi() || shelf.isEmpty()) return;
         float radius = (TILE_RADIUS + SHELF_PAD) * k;
         tmp.set(platterRect);
         tmp.offset(0, 18 * k);
@@ -1294,6 +1338,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      * top. No border and no reflection, as Apple does it.
      */
     private void drawShelfTile(Canvas c, int i) {
+        if (moi()) {
+            drawMoiTile(c, i);
+            return;
+        }
         HomeApps.Item it = shelf.get(i);
         // Lifted to be moved: a little bigger than focused, with a deeper shadow.
         float l = i == liftIndex ? Math.max(0, moveLift.value) : 0;
@@ -1347,6 +1395,66 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         } else {
             if (it.tile != null) roundImage(c, it.tile, cell, r);
         }
+    }
+
+    /**
+     * Moi keeps the real brand card from the normal home.  The first pass put smoked glass and a blue brand tint over
+     * every logo; that looked uniform, but it also washed out artwork such as Prime Video.  The only extra material
+     * here is a hairline glass rim, strongest at focus, so the card itself remains recognisably the application's.
+     */
+    private void drawMoiTile(Canvas c, int i) {
+        HomeApps.Item it = shelf.get(i);
+        float f = Ui.clamp(tileFocus[i].value), s = 1 + .065f * f;
+        RectF base = tileRects[i];
+        float cx = base.centerX(), cy = base.centerY();
+        cell.set(cx - base.width() * s / 2, cy - base.height() * s / 2,
+                cx + base.width() * s / 2, cy + base.height() * s / 2);
+        float radius = 20 * k * s;
+        if (f > 0.01f) {
+            tmp.set(cell);
+            tmp.offset(0, 12 * k * f);
+            shadowDeep.setColor(Ui.alpha(0xFF000000, .52f * f));
+            shadows.draw(c, tmp, radius, DEEP_BLUR * k, shadowDeep);
+        }
+        int[] style = TILE_STYLE.get(it.key);
+        if (it.kind == HomeApps.ALL_APPS) {
+            drawerGlass(c, cell, radius, 0.46f, 0x21000000, 7 * k);
+            Symbols.draw(getContext(), c, it.symbol, cell.centerX(), cell.centerY(), 48 * k, moiPrimary());
+        } else if (it.logo != null && style != null) {
+            // This is the normal Free My TV brand card: do not tint or cover it in Moi Dark.
+            if (tileShaders.length != shelf.size() || tileShaderH != base.height()) {
+                tileShaders = new LinearGradient[shelf.size()];
+                tileShaderH = base.height();
+                tileGlow = new LinearGradient(0, -base.height() / 2, 0, 0, 0x14FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP);
+            }
+            if (tileShaders[i] == null) {
+                tileShaders[i] = new LinearGradient(0, -base.height() / 2, 0, base.height() / 2,
+                        style[0], style[1], Shader.TileMode.CLAMP);
+            }
+            tileFill.setShader(tileShaders[i]);
+            tileFill.setAlpha(255);
+            c.drawRoundRect(cell, radius, radius, tileFill);
+            tileFill.setShader(null);
+            drawLogo(c, it, cell, s, style[2]);
+        } else if (it.logo != null) {
+            tileFill.setShader(null);
+            tileFill.setColor(0xFF161618);
+            c.drawRoundRect(cell, radius, radius, tileFill);
+            drawLogo(c, it, cell, s, 0);
+        } else if (it.tile != null) {
+            roundImage(c, it.tile, cell, radius);
+        } else {
+            drawerGlass(c, cell, radius, 0.46f, 0x21000000, 7 * k);
+            Symbols.draw(getContext(), c, "apps", cell.centerX(), cell.centerY(), 44 * k, moiPrimary());
+        }
+        // The glossy outline is deliberately not a tinted mask.  It feels like glass at rest and becomes a clear
+        // tvOS-style focus indication without competing with the brand colour.
+        border.setColor(Ui.alpha(moiLight() ? 0xFF245F9F : 0xFFFFFFFF, .18f + .74f * f));
+        border.setStrokeWidth((1.15f + 1.1f * f) * k);
+        c.drawRoundRect(cell, radius, radius, border);
+        border.setStrokeWidth(2 * k);
+        // The lift, shadow and bright glass rim are the entire focus affordance.  A label underneath turns a compact
+        // app grid into an uneven list and competes with the next row, especially on 1080p TVs.
     }
 
     /**
@@ -1432,9 +1540,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     // MARK: - Bottom drawer
 
-    private static List<HomeApps.Item> drawerList(Context c) {
+    private List<HomeApps.Item> drawerList(Context c) {
         List<HomeApps.Item> list = HomeApps.allInputs(c);
-        list.addAll(HomeApps.drawerShortcuts());
+        // Moi's upper-right trio already owns launcher settings, notifications and TV settings.  Keeping those in the
+        // drawer produced a second copy of the same controls after pressing Down.
+        if (!moi()) list.addAll(HomeApps.drawerShortcuts());
         return list;
     }
 
@@ -1463,6 +1573,21 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void layoutDrawer() {
         int n = drawerItems.size();
+        if (moi()) {
+            // Keep the first source under the dashboard's left edge.  A TV source rail must not drift to the centre
+            // merely because a home has fewer HDMI devices than another home.
+            float left = MOI_LEFT * k, right = MOI_R * k, gap = 18 * k;
+            float tw = Math.min(230 * k, (right - left - Math.max(0, n - 1) * gap) / Math.max(1, n));
+            float x = left, top = MOI_INPUT_TOP * k;
+            for (int i = 0; i < n; i++) {
+                drawerRects[i].set(x, top, x + tw, top + MOI_INPUT_H * k);
+                x += tw + gap;
+            }
+            weatherCard.setEmpty();
+            quotesCard.setEmpty();
+            drawerDirty = true;
+            return;
+        }
         float left = MARGIN * k, right = CONTENT_R * k;
         float gap = 18 * k, groupGap = 56 * k;
         int groups = drawerInputs > 0 && drawerInputs < n ? 2 : 1;
@@ -1483,6 +1608,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void openDrawer() {
         if (drawerItems.isEmpty()) return;
+        if (moi()) {
+            // In Moi, Inputs live permanently beneath the app grid.  Moving down changes focus to that rail; it does
+            // not pull in a second drawer or move the rest of the dashboard.
+            drawerOpen = false;
+            drawer.target = 0;
+            zone = Z_DRAWER;
+            drawerIndex = shelf.isEmpty() ? 0 : nearest(drawerRects, tileRects[shelfIndex].centerX());
+            for (int i = 0; i < drawerFocus.length; i++) drawerFocus[i].snap(i == drawerIndex ? 1 : 0);
+            drawerDirty = heroDirty = true;
+            return;
+        }
         drawerOpen = true;
         drawer.target = 1;
         zone = Z_DRAWER;
@@ -1497,6 +1633,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         zone = Z_SHELF;
         for (Spring f : drawerFocus) f.snap(0);   // the drawer goes away: its focus doesn't need to animate
         if (!shelf.isEmpty() && drawerIndex < drawerRects.length) shelfIndex = nearest(tileRects, drawerRects[drawerIndex].centerX());
+        if (moi()) heroDirty = true;
     }
 
     /** Color for the drawer's text and symbols: dark by day, white at night. */
@@ -1522,6 +1659,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private void drawDrawer(Canvas c) {
+        if (moi()) return;     // Moi draws this same interactive input rail in drawMoiDashboard().
         if (drawerItems.isEmpty()) return;
         rowTitle.setColor(tone(L_DIM, 0xB3FFFFFF));
         cardTitle.setColor(tone(L_DIM, 0xB3FFFFFF));
@@ -1557,14 +1695,50 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             shadow.setColor(Ui.alpha(0xFF000000, 0.45f * f));
             shadows.draw(c, tmp, r, SHADOW_BLUR * k, shadow);
         }
-        if (f < 0.99f) drawerGlass(c, cell, r, 0.7f, 0x14000000, 6 * k);
-        if (f > 0.01f) {
-            fill.setShader(null);
-            fill.setColor(Ui.alpha(WHITE, f));
-            c.drawRoundRect(cell, r, r, fill);
+        if (moi()) {
+            // Keep the elevated, glossy material of Free My TV's stock drawer. Focus lights the same glass; it must
+            // never turn into a disconnected opaque white tile.
+            drawerGlass(c, cell, r, 0.7f, 0x14000000, 6 * k);
+            if (f > 0.01f) {
+                fill.setShader(null);
+                fill.setColor(Ui.alpha(moiLight() ? 0xFFBAD4F5 : 0xFFEAF3FF, .24f * f));
+                c.drawRoundRect(cell, r, r, fill);
+            }
+            border.setColor(Ui.alpha(moiLight() ? 0xFF245F9F : 0xFFFFFFFF, .22f + .72f * f));
+            border.setStrokeWidth((1.1f + 1.3f * f) * k);
+            c.drawRoundRect(cell, r, r, border);
+            border.setStrokeWidth(2 * k);
+        } else {
+            if (f < 0.99f) drawerGlass(c, cell, r, 0.7f, 0x14000000, 6 * k);
+            if (f > 0.01f) {
+                fill.setShader(null);
+                fill.setColor(Ui.alpha(WHITE, f));
+                c.drawRoundRect(cell, r, r, fill);
+            }
         }
-        boolean off = it.kind == HomeApps.INPUT && !it.connected;
+        boolean off = (it.kind == HomeApps.INPUT || it.kind == HomeApps.LIVE_TV) && !it.connected;
         int ink = blend(tone(off ? 0xFF8E8E93 : L_INK, off ? 0x6BFFFFFF : 0xF2FFFFFF), INK, f);
+        if (moi()) {
+            // This has the same centred hierarchy as a tvOS tile: symbol, device name, physical source.  The prior
+            // left-aligned version left an accidental-looking hole beside the icon on wide HDMI cards.
+            int moiInk = off ? (moiLight() ? 0xFF7A8DA5 : 0xA8D5DFEE) : moiPrimary();
+            Symbols.draw(getContext(), c, it.symbol, cell.centerX(), cell.top + 27 * k * s, 26 * k * s, moiInk);
+            drawerLabel.setColor(moiInk);
+            drawerLabel.setTextAlign(Paint.Align.CENTER);
+            drawerLabel.setTextSize(20 * k * s);
+            float room = cell.width() - 26 * k;
+            fitPaint.set(drawerLabel);
+            String label = TextUtils.ellipsize(it.label, fitPaint, room, TextUtils.TruncateAt.END).toString();
+            c.drawText(label, cell.centerX(), cell.top + 67 * k, drawerLabel);
+            String source = it.kind == HomeApps.INPUT ? "HDMI " + it.number : Ui.tr("Antenna / cable");
+            cardDim.setColor(off ? (moiLight() ? 0xFF8A9DB4 : 0x87D5DFEE) : Ui.alpha(moiSecondary(), .84f));
+            cardDim.setTextAlign(Paint.Align.CENTER);
+            cardDim.setTextSize(15 * k * s);
+            c.drawText(source, cell.centerX(), cell.bottom - 15 * k, cardDim);
+            drawerLabel.setTextSize(23 * k);
+            cardDim.setTextAlign(Paint.Align.LEFT);
+            return;
+        }
         Symbols.draw(getContext(), c, it.symbol, cx, cell.top + cell.height() * 0.4f, 34 * k * s, ink);
         drawerLabel.setColor(ink);
         drawerLabel.setTextSize(23 * k * s);
@@ -1768,6 +1942,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private void openSheet() {
+        notificationsSheet = false;
         sheetOpen = true;
         gridIndex = 0;
         scroll.snap(0);
@@ -1779,6 +1954,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void closeSheet() {
         sheetOpen = false;
+        notificationsSheet = false;
         sheet.target = 0;
         retarget(false);
         if (shelfEdited) {     // the grid was kept as it was while open: apps that went to the shelf leave it now
@@ -1804,8 +1980,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private void drawSheet(Canvas c) {
-        c.drawColor(0xA8000000);
+        c.drawColor(moiLight() ? 0x7ADCE8F5 : 0xA8000000);
+        if (notificationsSheet) {
+            drawNotificationSheet(c);
+            return;
+        }
         float shift = scroll.value * GRID_ROW * k;
+        if (moi()) sheetTitle.setColor(moiPrimary());
         c.drawText(Ui.tr("All Apps"), w / 2f, 124 * k - shift, sheetTitle);
         int n = others.size();
         if (gridLabels == null || gridLabels.length != n) {
@@ -1825,10 +2006,104 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             gridCell.set(x, y, x + GRID_W * k, y + GRID_H * k);
             float f = gridFocus[i].value;
             drawCard(c, others.get(i).tile, gridCell, GRID_RADIUS * k, f, 0.08f);
+            if (moi() && others.get(i).onShelf) {
+                float badge = 26 * k;
+                fill.setShader(null);
+                fill.setColor(moiLight() ? 0xFF245F9F : 0xDDF4F8FF);
+                c.drawCircle(gridCell.right - 22 * k, gridCell.top + 22 * k, badge, fill);
+                Symbols.draw(getContext(), c, "check", gridCell.right - 22 * k, gridCell.top + 22 * k, 22 * k,
+                        moiLight() ? 0xFFFFFFFF : 0xFF15233A);
+            } else if (moi() && others.get(i).kind == HomeApps.APP) {
+                float badge = 26 * k;
+                fill.setShader(null);
+                fill.setColor(moiLight() ? 0xD9E9F2FF : 0xC41C2A42);
+                c.drawCircle(gridCell.right - 22 * k, gridCell.top + 22 * k, badge, fill);
+                cardText.setColor(moiLight() ? 0xFF245F9F : 0xFFF4F8FF);
+                cardText.setTextAlign(Paint.Align.CENTER);
+                c.drawText("+", gridCell.right - 22 * k, gridCell.top + 22 * k + Ui.halfCap(cardText), cardText);
+                cardText.setTextAlign(Paint.Align.LEFT);
+            }
             if (sheetOpen && i == gridIndex) focusedCell.set(cell);
-            gridLabel.setColor(blend(0x99FFFFFF, 0xFFFFFFFF, Ui.clamp(f)));
+            gridLabel.setColor(moi() ? blend(moiSecondary(), moiPrimary(), Ui.clamp(f))
+                    : blend(0x99FFFFFF, 0xFFFFFFFF, Ui.clamp(f)));
             c.drawText(gridLabels[i], gridCell.centerX(), gridCell.bottom + (40 + 6 * f) * k, gridLabel);
         }
+    }
+
+    /** A calm, explicit panel is appropriate for notifications; transient toasts are not a TV notification centre. */
+    private void drawNotificationSheet(Canvas c) {
+        RectF panel = new RectF(310 * k, 154 * k, 1610 * k, 926 * k);
+        drawMoiSurface(c, panel);
+        sheetTitle.setColor(moiPrimary());
+        Symbols.draw(getContext(), c, "bell", panel.centerX(), panel.top + 44 * k, 30 * k, moiPrimary());
+        c.drawText(Ui.tr("Notifications"), panel.centerX(), panel.top + 102 * k, sheetTitle);
+        if (deviceNotifications.isEmpty()) {
+            cardText.setColor(moiPrimary());
+            cardText.setTextAlign(Paint.Align.CENTER);
+            c.drawText(Ui.tr("No device notifications in the last 24 hours."), panel.centerX(), panel.centerY() - 12 * k, cardText);
+            cardDim.setColor(moiSecondary());
+            cardDim.setTextAlign(Paint.Align.CENTER);
+            c.drawText(Ui.tr("Back to close"), panel.centerX(), panel.centerY() + 36 * k, cardDim);
+            cardDim.setTextAlign(Paint.Align.LEFT);
+            cardText.setTextAlign(Paint.Align.LEFT);
+            return;
+        }
+        float top = panel.top + 138 * k, rowH = 94 * k;
+        for (int i = 0; i < deviceNotifications.size(); i++) {
+            DeviceNotifications.Entry item = deviceNotifications.get(i);
+            float y = top + i * rowH;
+            tmp.set(panel.left + 42 * k, y, panel.right - 42 * k, y + rowH - 8 * k);
+            if (i == notificationIndex) {
+                fill.setColor(moiLight() ? 0x24356DAB : 0x34FFFFFF);
+                c.drawRoundRect(tmp, 16 * k, 16 * k, fill);
+                border.setColor(moiFocus());
+                border.setStrokeWidth(2.2f * k);
+                c.drawRoundRect(tmp, 16 * k, 16 * k, border);
+                border.setStrokeWidth(2 * k);
+            } else {
+                fill.setColor(moiLight() ? 0x120D2440 : 0x1DFFFFFF);
+                c.drawRoundRect(tmp, 16 * k, 16 * k, fill);
+            }
+            cardDim.setColor(moiSecondary());
+            fitPaint.set(cardDim);
+            c.drawText(TextUtils.ellipsize(item.app, fitPaint, tmp.width() - 48 * k, TextUtils.TruncateAt.END).toString(),
+                    tmp.left + 24 * k, tmp.top + 27 * k, cardDim);
+            fitPaint.set(cardText);
+            cardText.setColor(moiPrimary());
+            c.drawText(TextUtils.ellipsize(item.title, fitPaint, tmp.width() - 48 * k, TextUtils.TruncateAt.END).toString(),
+                    tmp.left + 24 * k, tmp.top + 62 * k, cardText);
+        }
+        DeviceNotifications.Entry item = deviceNotifications.get(notificationIndex);
+        float detailTop = top + deviceNotifications.size() * rowH + 10 * k;
+        fill.setColor(moiLight() ? 0x120D2440 : 0x1DFFFFFF);
+        c.drawRoundRect(panel.left + 42 * k, detailTop, panel.right - 42 * k, panel.bottom - 82 * k, 16 * k, 16 * k, fill);
+        cardDim.setColor(moiSecondary());
+        cardDim.setTextSize(18 * k);
+        c.drawText(Ui.tr("Detail"), panel.left + 66 * k, detailTop + 27 * k, cardDim);
+        fitPaint.set(cardText);
+        fitPaint.setColor(moiPrimary());
+        fitPaint.setTextSize(23 * k);
+        String detail = item.body.isEmpty() ? item.title : item.body;
+        StaticLayout body = StaticLayout.Builder.obtain(detail, 0, detail.length(), fitPaint,
+                        Math.max(1, Math.round(panel.width() - 132 * k)))
+                .setMaxLines(3).setEllipsize(TextUtils.TruncateAt.END).build();
+        c.save();
+        c.translate(panel.left + 66 * k, detailTop + 47 * k);
+        body.draw(c);
+        c.restore();
+        cardDim.setColor(moiSecondary());
+        c.drawText(Ui.tr("OK opens · Hold OK dismisses · Back closes"), panel.left + 64 * k, panel.bottom - 42 * k, cardDim);
+    }
+
+    private void openNotifications(List<DeviceNotifications.Entry> recent) {
+        deviceNotifications = new ArrayList<>(recent);
+        notificationIndex = 0;
+        notificationsSheet = true;
+        sheetOpen = true;
+        sheet.target = 1;
+        retarget(false);
+        gridDirty = true;
+        wake();
     }
 
     /** 16:9 sheet card. Focused (the shelf's subtle focus): it grows, with a shadow, a soft sheen and a thin border. */
@@ -2035,7 +2310,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                         okDown = true;
                         okHeld = false;
                         handler.removeCallbacks(holdStart);
-                        holdArmed = sheetOpen ? canToggleShelf(gridIndex) : canReorder();
+                        holdArmed = sheetOpen
+                                ? (notificationsSheet ? canDismissNotification() : canToggleShelf(gridIndex))
+                                : canReorder();
                         if (holdArmed) handler.postDelayed(holdStart, HOLD_MS);
                     } else if (okDown && holdArmed && e.isLongPress()) {
                         hold();
@@ -2070,6 +2347,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             zone = Z_SHELF;
             retarget(false);
         } else {
+            if (moi()) HomeMode.requestOriginalAmbient(getContext().getApplicationContext());
             return;
         }
         click.move();
@@ -2077,6 +2355,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void move(int dx, int dy) {
         if (sheetOpen) {
+            if (notificationsSheet) {
+                moveNotifications(dy);
+                return;
+            }
             moveGrid(dx, dy);
             return;
         }
@@ -2203,6 +2485,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         RectF r;
         if (!sheetOpen && zone == WIDGETS) return;   // a widget is only read
         if (sheetOpen) {
+            if (notificationsSheet) {
+                openFocusedNotification();
+                return;
+            }
             if (others.isEmpty()) return;
             it = others.get(gridIndex);
             r = focusedCell;
@@ -2237,6 +2523,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             r = tileRects[shelfIndex];
         }
         click.open();
+        if (it.kind == HomeApps.NOTIFICATIONS) {
+            showNotifications();
+            return;
+        }
         if (it.kind == HomeApps.ALL_APPS) {
             openSheet();
             return;
@@ -2252,15 +2542,85 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             retarget(false);
             return;
         }
+        // "Live TV" remains visible among the inputs even when this TV has no cable/antenna.  It is informative,
+        // not a failing shortcut: a dimmed card simply does nothing until Android exposes a tuner source.
+        if (it.kind == HomeApps.LIVE_TV && !it.connected) return;
         boolean opened = HomeApps.open(activity, it, this, Math.round(r.left), Math.round(r.top),
                 Math.round(r.width()), Math.round(r.height()));
         if (!opened) showToast(Ui.trf("Couldn't open {app}.", "app", it.label));
     }
 
+    /** Shows the TV's notifications only after the owner explicitly grants Android's Notification access. */
+    private void showNotifications() {
+        final Context c = getContext().getApplicationContext();
+        if (!DeviceNotifications.enabled(c)) {
+            try {
+                activity.startActivity(new android.content.Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+            } catch (RuntimeException e) {
+                showToast(Ui.tr("Open TV Settings to allow notification access for Free My TV."));
+            }
+            return;
+        }
+        LOADER.execute(() -> {
+            final List<DeviceNotifications.Entry> recent = DeviceNotifications.recent(c);
+            handler.post(() -> openNotifications(recent));
+        });
+    }
+
     // MARK: - Holding OK: All Apps puts the app on the shelf or takes it off; on the shelf, the app is lifted to move
 
     private void hold() {
-        if (sheetOpen) toggleShelf(); else startReorder();
+        if (notificationsSheet) dismissFocusedNotification();
+        else if (sheetOpen) toggleShelf();
+        else startReorder();
+    }
+
+    private void moveNotifications(int dy) {
+        if (dy == 0 || deviceNotifications.isEmpty()) return;
+        int next = Math.max(0, Math.min(deviceNotifications.size() - 1, notificationIndex + dy));
+        if (next == notificationIndex) return;
+        notificationIndex = next;
+        gridDirty = true;
+        click.move();
+        wake();
+    }
+
+    private boolean canDismissNotification() {
+        return notificationsSheet && notificationIndex >= 0 && notificationIndex < deviceNotifications.size()
+                && !deviceNotifications.get(notificationIndex).key.isEmpty();
+    }
+
+    /** Opens the app-provided action. Android deliberately omits this for informational system notices. */
+    private void openFocusedNotification() {
+        if (notificationIndex < 0 || notificationIndex >= deviceNotifications.size()) return;
+        DeviceNotifications.Entry item = deviceNotifications.get(notificationIndex);
+        if (DeviceNotifications.open(item.key)) {
+            click.open();
+            closeSheet();
+        } else {
+            showToast(Ui.tr("This notification can't be opened."));
+        }
+    }
+
+    /** A held OK is intentional on a TV remote, so normal OK can remain the notification's primary action. */
+    private void dismissFocusedNotification() {
+        handler.removeCallbacks(holdStart);
+        holdArmed = false;
+        if (!canDismissNotification()) {
+            showToast(Ui.tr("This notification can't be dismissed."));
+            return;
+        }
+        DeviceNotifications.Entry item = deviceNotifications.get(notificationIndex);
+        if (!DeviceNotifications.dismiss(item.key)) {
+            showToast(Ui.tr("This notification can't be dismissed."));
+            return;
+        }
+        DeviceNotifications.remove(getContext().getApplicationContext(), item.key);
+        deviceNotifications.remove(notificationIndex);
+        notificationIndex = Math.max(0, Math.min(notificationIndex, deviceNotifications.size() - 1));
+        click.open();
+        gridDirty = true;
+        wake();
     }
 
     /** TalkBack's long click on an app in All Apps (once per press, if the remote's hold also arrives). */
@@ -2293,18 +2653,19 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             int shown = 0;
             boolean on = false;
             for (String p : list) {
-                if (shown >= HomeApps.MAX_SHELF) break;
+                if (shown >= HomeApps.shelfLimit()) break;
                 if (HomeApps.launchIntent(pm, p) == null) continue;
                 shown++;
                 on |= p.equals(it.pkg);
             }
+            final boolean wasOn = on;
             final String text;
             list.remove(it.pkg);
             if (on) {
                 text = Ui.trf("Removed from the shelf: {app}", "app", it.label);
             } else {
-                if (shown >= HomeApps.MAX_SHELF) {
-                    handler.post(() -> showToast(Ui.tr("The shelf is full. Make room in Free My TV › Shelf.")));
+                if (shown >= HomeApps.shelfLimit()) {
+                    handler.post(() -> showToast(Ui.tr("The grid is full. Remove an app to make room.")));
                     return;
                 }
                 list.add(it.pkg);
@@ -2312,7 +2673,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             }
             Prefs.setShelf(list);   // here, so the next hold reads the new list
             handler.post(() -> {
+                it.onShelf = !wasOn;
                 shelfEdited = true;
+                gridDirty = true;
                 showToast(text);
                 reload();
             });
@@ -2384,6 +2747,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         int i = shelfIndex, j = i + dx;
         if (j < 0 || j >= shelf.size()) return;
         HomeApps.Item it = shelf.get(i);
+        // "All apps" is a fixed doorway, not an app that can be mixed into the saved order.
+        if (moi() && shelf.get(j).kind != HomeApps.APP) return;
         shelf.set(i, shelf.get(j));
         shelf.set(j, it);
         Spring f = tileFocus[i];
@@ -2419,7 +2784,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         retarget(false);
         if (!changed) return;
         final List<String> order = new ArrayList<>();
-        for (HomeApps.Item it : shelf) order.add(it.pkg);
+        for (HomeApps.Item it : shelf) {
+            if (it.kind == HomeApps.APP && it.pkg != null) order.add(it.pkg);
+        }
         final Context c = getContext().getApplicationContext();
         LOADER.execute(() -> {
             // The saved list may hold more than the shelf shows (apps not installed, past the limit): the shown ones
@@ -2716,6 +3083,23 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     // MARK: - Light design: title, tabs, cards and icon-only buttons
 
+    /** Moi is a dashboard layout with two intentionally designed palettes, not a normal auto theme. */
+    private boolean moi() {
+        return Prefs.moiTheme();
+    }
+
+    private boolean moiLight() {
+        return "moi-light".equals(Prefs.theme());
+    }
+
+    // Moi's semantic palette.  Keeping roles here prevents an accidental "invert everything" light theme and makes
+    // focus, copy and glass edge colors stay coherent when the system changes between the two named themes.
+    private int moiPrimary() { return moiLight() ? 0xFF17243A : 0xFFF4F8FF; }
+    private int moiSecondary() { return moiLight() ? 0xFF4A5E78 : 0xFFDCE7F7; }
+    private int moiMuted() { return moiLight() ? 0xFF687B93 : 0xFFB8C7DA; }
+    private int moiFocus() { return moiLight() ? 0xFF245F9F : 0xFFF4F8FF; }
+    private int moiGlassEdge() { return moiLight() ? 0x2C18314F : 0x26FFFFFF; }
+
     private void layoutLight() {
         if (lTab == null) return;
         // Text tabs; the focus pill extends 26 px past the text (the first tab's text starts at the margin).
@@ -2804,6 +3188,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private void drawLightTop(Canvas c) {
+        if (moi()) {
+            drawMoiDashboard(c);
+            return;
+        }
         applyTone();
         if (!picksOn()) {
             drawClock(c);
@@ -2841,6 +3229,104 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         for (int i = 0; i < 3; i++) if (i != top) drawLightCard(c, i);
         if (top >= 0) drawLightCard(c, top);
         if (HomeData.coinCount() > 0) drawQuotes(c);
+    }
+
+    /** The intentional no-recommendations home: weather on the left and apps on the right, at TV viewing distance. */
+    private void drawMoiDashboard(Canvas c) {
+        moiDate.setColor(moiSecondary());
+        moiTime.setColor(moiPrimary());
+        moiSection.setColor(moiPrimary());
+        float x = MOI_LEFT * k;
+        String date = dateText.toUpperCase(Ui.locale());
+        // One visual baseline: this is a proper top bar, not two unrelated pieces of text.
+        c.drawText(date, x, 106 * k, moiDate);
+        c.drawText(clockText, x + moiDate.measureText(date) + 26 * k, 106 * k, moiTime);
+
+        RectF weather = new RectF(MOI_LEFT * k, MOI_TOP * k, MOI_WIDGET_R * k, MOI_BOTTOM * k);
+        RectF apps = new RectF(MOI_APPS_L * k, MOI_TOP * k, MOI_R * k, MOI_APPS_BOTTOM * k);
+        drawMoiSurface(c, weather);
+        drawMoiSurface(c, apps);
+        drawMoiWeather(c, weather);
+        c.drawText(Ui.tr("Apps"), apps.left + 30 * k, apps.top + 52 * k, moiSection);
+        drawMoiInputs(c);
+    }
+
+    /** The inputs are part of Moi's home composition, not a second screen below it. */
+    private void drawMoiInputs(Canvas c) {
+        if (drawerItems.isEmpty()) return;
+        c.drawText(Ui.tr("Inputs"), MOI_LEFT * k, MOI_INPUT_TITLE * k, moiSection);
+        int top = -1;
+        for (int i = 0; i < drawerItems.size(); i++) {
+            if (drawerFocus[i].value > 0.02f && (top < 0 || drawerFocus[i].value > drawerFocus[top].value)) top = i;
+        }
+        for (int i = 0; i < drawerItems.size(); i++) if (i != top) drawDrawerTile(c, i);
+        if (top >= 0) drawDrawerTile(c, top);
+    }
+
+    private void drawMoiSurface(Canvas c, RectF r) {
+        float radius = 30 * k;
+        // A frosted surface should be perceived from the light it catches, not from a hard rectangle around it.
+        // Do not paint a literal reflection strip here: on several Sony compositor paths it resolves into visible bands.
+        drawerGlass(c, r, radius, 0.56f, 0x32000000, 13 * k);
+        border.setColor(moiGlassEdge());
+        border.setStrokeWidth(1.1f * k);
+        c.drawRoundRect(r, radius, radius, border);
+        border.setStrokeWidth(2 * k);
+    }
+
+    /** A compact weather view: current conditions plus the next six hours, without a second redundant widget. */
+    private void drawMoiWeather(Canvas c, RectF r) {
+        refreshDrawerText();
+        // Drawer tiles mutate these shared paints.  Reset them here so the weather footer remains high-contrast even
+        // after an unfocused HDMI card was drawn on the preceding frame.
+        cardText.setColor(moiPrimary());
+        cardDim.setColor(moiSecondary());
+        cardDim.setTextAlign(Paint.Align.LEFT);
+        cardDim.setTextSize(22 * k);
+        bigTemp.setColor(moiPrimary());
+        hourPaint.setColor(moiSecondary());
+        hourPaint.setTextAlign(Paint.Align.CENTER);
+        hourTemp.setColor(moiPrimary());
+        hourTemp.setTextAlign(Paint.Align.CENTER);
+        float x = r.left + 34 * k;
+        c.drawText(weatherTitle, x, r.top + 56 * k, moiSection);
+        HomeData.Weather wx = data.weather;
+        if (!Prefs.weather() || Double.isNaN(wx.temp)) {
+            c.drawText(Ui.tr("No weather data right now."), x, r.top + 112 * k, cardDim);
+            return;
+        }
+        String symbol = Symbols.weather(wx.code, wx.isDay);
+        Symbols.draw(getContext(), c, symbol, x + 43 * k, r.top + 139 * k, 74 * k, moiPrimary());
+        c.drawText(nowTemp, x + 98 * k, r.top + 167 * k, bigTemp);
+        c.drawText(HomeData.condition(wx.code, wx.isDay), x, r.top + 222 * k, cardText);
+        c.drawText(highLow, x, r.top + 258 * k, cardDim);
+
+        float divider = r.top + 290 * k;
+        fill.setColor(0x26FFFFFF);
+        c.drawRoundRect(r.left + 30 * k, divider, r.right - 30 * k, divider + k, k, k, fill);
+        int hours = Math.min(6, wx.hours.size());
+        float left = r.left + 30 * k, width = (r.width() - 60 * k) / 6f;
+        for (int i = 0; i < hours; i++) {
+            float cx = left + width * (i + .5f);
+            c.drawText(hourText[i], cx, r.top + 348 * k, hourPaint);
+            Symbols.draw(getContext(), c, Symbols.weather(wx.hourCode.get(i), wx.hourDay.get(i)), cx,
+                    r.top + 402 * k, 34 * k, moiPrimary());
+            c.drawText(hourTempText[i], cx, r.top + 458 * k, hourTemp);
+        }
+        float footerTop = r.bottom - 86 * k;
+        fill.setColor(moiLight() ? 0x120D2440 : 0x3D000000);
+        c.drawRoundRect(r.left + 22 * k, footerTop, r.right - 22 * k, r.bottom - 22 * k, 16 * k, 16 * k, fill);
+        float base = r.bottom - 45 * k, sx = x;
+        if (wx.sunrise != 0) sx = drawMoiSunItem(c, "sunrise", sunriseText, sx, base) + 26 * k;
+        if (wx.sunset != 0) drawMoiSunItem(c, "sunset", sunsetText, sx, base);
+    }
+
+    /** High-contrast sunrise/sunset footer for Moi; the standard drawer version deliberately stays more subdued. */
+    private float drawMoiSunItem(Canvas c, String symbol, String label, float x, float base) {
+        float size = 22 * k, sw = Symbols.width(getContext(), symbol, size);
+        Symbols.draw(getContext(), c, symbol, x + sw / 2, base - Ui.halfCap(cardDim), size, moiPrimary());
+        c.drawText(label, x + sw + 10 * k, base, cardDim);
+        return x + sw + 10 * k + cardDim.measureText(label);
     }
 
     private boolean picksOn() {
@@ -2939,6 +3425,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      * night); the focused one turns white with a dark icon (the tvOS focus) and its name appears below it.
      */
     private void drawLightButtons(Canvas c) {
+        if (moi()) {
+            drawMoiButtons(c);
+            return;
+        }
         applyTone();
         for (int i = 0; i < lightButtons.size(); i++) {
             HomeApps.Item it = lightButtons.get(i);
@@ -2968,7 +3458,41 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
     }
 
+    /** The three upper-right controls stay legible against the dashboard: Inputs · Notifications · Settings. */
+    private void drawMoiButtons(Canvas c) {
+        for (int i = 0; i < lightButtons.size(); i++) {
+            HomeApps.Item it = lightButtons.get(i);
+            RectF r = topRects[3 + i];
+            float f = Ui.clamp(topFocus[3 + i].value), s = 1 + .09f * f, rad = r.width() * s / 2;
+            cell.set(r.centerX() - rad, r.centerY() - rad, r.centerX() + rad, r.centerY() + rad);
+            if (f > .01f) {
+                tmp.set(cell);
+                tmp.offset(0, 9 * k * f);
+                shadow.setColor(Ui.alpha(0xFF000000, .5f * f));
+                shadows.draw(c, tmp, rad, SHADOW_BLUR * k, shadow);
+            }
+            int rest = moiLight() ? 0xD9EAF1F9 : 0xE9223048;
+            int focused = moiLight() ? 0xFF245F9F : 0xFFF6F9FF;
+            fill.setShader(null);
+            fill.setColor(blend(rest, focused, f));
+            c.drawCircle(cell.centerX(), cell.centerY(), rad, fill);
+            border.setColor(Ui.alpha(moiLight() ? 0xFF245F9F : 0xFFFFFFFF, .2f + .6f * f));
+            border.setStrokeWidth(1.5f * k);
+            c.drawCircle(cell.centerX(), cell.centerY(), rad, border);
+            border.setStrokeWidth(2 * k);
+            Symbols.draw(getContext(), c, it.symbol, cell.centerX(), cell.centerY(), 27 * k * s,
+                    f > .5f ? (moiLight() ? 0xFFFFFFFF : 0xFF15233A) : moiPrimary());
+            if (f > .01f) {
+                lTip.setColor(moiPrimary());
+                lTip.setAlpha(Math.round(255 * f));
+                c.drawText(it.label, r.centerX(), r.bottom + (38 + 5 * f) * k, lTip);
+                lTip.setAlpha(255);
+            }
+        }
+    }
+
     private boolean moveLight(int dx, int dy) {
+        if (moi()) return moveMoi(dx, dy);
         switch (zone) {
             case Z_SHELF:
                 // Up from an empty shelf too: move()'s older zones (the hero, the corner capsule) aren't drawn any more.
@@ -3013,6 +3537,49 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 } else {
                     return true;
                 }
+                break;
+            default:
+                return false;
+        }
+        retarget(false);
+        click.move();
+        return true;
+    }
+
+    private boolean moveMoi(int dx, int dy) {
+        switch (zone) {
+            case Z_SHELF:
+                if (shelf.isEmpty()) return true;
+                if (dx != 0) {
+                    int candidate = shelfIndex + dx;
+                    if (candidate < 0 || candidate >= shelf.size() || candidate / MOI_COLUMNS != shelfIndex / MOI_COLUMNS) return true;
+                    shelfIndex = candidate;
+                } else if (dy < 0) {
+                    if (shelfIndex >= MOI_COLUMNS) shelfIndex -= MOI_COLUMNS;
+                    else {
+                        zone = Z_TOP;
+                        topIndex = 3 + Math.min(1, Math.max(0, lightButtons.size() - 1));
+                    }
+                } else {
+                    int candidate = shelfIndex + MOI_COLUMNS;
+                    if (candidate >= shelf.size()) {
+                        // Down is a spatial path to Inputs.  The old dashboard swallowed this press, which made the
+                        // drawer look touch-only even though it is a TV interface.
+                        openDrawer();
+                        return true;
+                    }
+                    shelfIndex = candidate;
+                }
+                break;
+            case Z_TOP:
+                if (dx != 0) {
+                    int next = Math.max(3, Math.min(2 + lightButtons.size(), topIndex + dx));
+                    if (next == topIndex) return true;
+                    topIndex = next;
+                } else if (dy > 0) {
+                    zone = Z_SHELF;
+                    if (!shelf.isEmpty()) shelfIndex = Math.min(shelf.size() - 1, Math.max(0, topIndex - 3));
+                } else return true;
                 break;
             default:
                 return false;

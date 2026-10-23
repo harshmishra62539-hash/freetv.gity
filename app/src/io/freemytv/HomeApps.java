@@ -54,7 +54,8 @@ import java.util.regex.Pattern;
 final class HomeApps {
     private HomeApps() {}
 
-    static final int APP = 0, LIVE_TV = 1, INPUT = 2, ALL_APPS = 3, SETTINGS = 4, ANDROID_SETTINGS = 5;
+    static final int APP = 0, LIVE_TV = 1, INPUT = 2, ALL_APPS = 3, SETTINGS = 4, ANDROID_SETTINGS = 5,
+            NOTIFICATIONS = 8;
     /** The "HDMI Inputs" button: opens the bottom drawer on the inputs (the home screen handles it). */
     static final int INPUTS = 7;
     /** Image size of each card (16:9; on screen it shows up to ~330 px wide). */
@@ -71,6 +72,7 @@ final class HomeApps {
         float logoInk;      // fraction of the logo with ink (thin logos are drawn larger, with the same "weight")
         float logoScale = 1; // size tweak by eye (compact logos need more)
         boolean connected = true;
+        boolean onShelf;
     }
 
     /**
@@ -94,7 +96,12 @@ final class HomeApps {
         {"globoplay", "Globoplay", "com.globo.globotv", "FF5A1F", "tint", "1"},
         {"spotify", "Spotify", "com.spotify.tv.android", "1DB954", "", "1"},
     };
-    static final int MAX_SHELF = 8;
+    /** The original horizontal dock stays deliberately short; Moi's 5×4 grid has nineteen app cells plus All Apps. */
+    static final int MAX_SHELF = 8, MAX_MOI_SHELF = 19;
+
+    static int shelfLimit() {
+        return Prefs.moiTheme() ? MAX_MOI_SHELF : MAX_SHELF;
+    }
     /** Live TV apps of some brands (the antenna's channels open through the standard Android request first). */
     static final String[] LIVE_TV_APPS = {"com.tcl.tv", "com.google.android.tv", "com.mediatek.wwtv.tvcenter", "com.sony.dtv.tvx",
             "com.smartdevice.livetv", "com.mediatek.tv.oneworld.tvcenter"};
@@ -127,7 +134,7 @@ final class HomeApps {
         List<Item> items = new ArrayList<>();
         PackageManager pm = c.getPackageManager();
         for (String pkg : shelfPackages(c)) {
-            if (items.size() >= MAX_SHELF) break;
+            if (items.size() >= shelfLimit()) break;
             Intent launch = launchIntent(pm, pkg);
             if (launch == null) continue;
             ResolveInfo ri = pm.resolveActivity(launch, 0);
@@ -187,7 +194,9 @@ final class HomeApps {
 
     // MARK: - Top buttons (the round ones at the top right)
 
-    static final String TOP_LIVE = "live", TOP_INPUTS = "inputs", TOP_SETTINGS = "settings";
+    static final String TOP_LIVE = "live", TOP_INPUTS = "inputs", TOP_NOTIFICATIONS = "notifications",
+            TOP_SETTINGS = "settings", TOP_TV_SETTINGS = "tv-settings";
+    /** The original themes keep their standard trio. Moi Dark owns a separate, non-duplicated trio. */
     static final List<String> TOP_DEFAULT = Collections.unmodifiableList(java.util.Arrays.asList(TOP_LIVE, TOP_INPUTS, TOP_SETTINGS));
     static final int MAX_TOP = TOP_DEFAULT.size();
 
@@ -207,10 +216,21 @@ final class HomeApps {
         return items;
     }
 
+    /** Moi Dark always has its complete, predictable upper-right trio, independent of an older custom button order. */
+    static List<Item> moiTopButtons() {
+        List<Item> items = new ArrayList<>();
+        items.add(topButton(TOP_SETTINGS));
+        items.add(topButton(TOP_NOTIFICATIONS));
+        items.add(topButton(TOP_TV_SETTINGS));
+        return items;
+    }
+
     private static Item topButton(String key) {
         switch (key) {
             case TOP_LIVE: return action(LIVE_TV, TOP_LIVE, Ui.tr("light|Live TV"), "live_tv");
             case TOP_INPUTS: return action(INPUTS, TOP_INPUTS, Ui.tr("HDMI Inputs"), "hdmi");
+            case TOP_NOTIFICATIONS: return action(NOTIFICATIONS, TOP_NOTIFICATIONS, Ui.tr("Notifications"), "bell");
+            case TOP_TV_SETTINGS: return action(ANDROID_SETTINGS, TOP_TV_SETTINGS, Ui.tr("TV Settings"), "tv_settings");
             default: return action(SETTINGS, TOP_SETTINGS, Ui.tr("light|Settings"), "settings");
         }
     }
@@ -247,6 +267,11 @@ final class HomeApps {
         return shortcut(kind, key, label, symbol);
     }
 
+    /** A card in Moi Dark that opens the full, pageable library of installed apps. */
+    static Item allApps() {
+        return action(ALL_APPS, "all", Ui.tr("All Apps"), "apps");
+    }
+
     /** Free My TV settings, in the corner of the home screen. */
     static Item settings() {
         return shortcut(SETTINGS, "settings", Ui.tr("Settings"), "settings");
@@ -277,11 +302,13 @@ final class HomeApps {
         return it;
     }
 
-    /** For the bottom drawer: live TV and every HDMI input (the ones with no device are shown dimmed). */
+    /** For the bottom drawer: Live TV is always visible; without a tuner/cable it is a dimmed, non-launchable input. */
     static List<Item> allInputs(Context c) {
         List<Item> items = new ArrayList<>();
-        if (liveTv(c) != null) items.add(shortcut(LIVE_TV, "live", Ui.tr("Live TV"), "tv"));
         items.addAll(inputs(c, true));
+        Item live = shortcut(LIVE_TV, "live", Ui.tr("Live TV"), "tv");
+        live.connected = liveTv(c) != null;
+        items.add(live);
         return items;
     }
 
@@ -366,13 +393,19 @@ final class HomeApps {
         return "hdmi";
     }
 
-    /** Installed, enabled TV apps that are not on the home screen (the TV's Settings is among them), plus our own. */
+    /**
+     * Installed, enabled TV apps plus Free My TV settings. Moi uses this as an editor, so it includes apps already
+     * on the home grid too: holding OK there toggles between add and remove.
+     */
     static List<Item> others(Context c) {
         PackageManager pm = c.getPackageManager();
         Set<String> skip = new HashSet<>();
-        // A built-in app is skipped only while it is on the shelf: one the person took off must still be listed here.
         List<String> onShelf = shelfPackages(c);
-        for (String[] d : SHELF) if (onShelf.contains(d[2])) skip.add(d[2]);
+        // The original shelf is a short dock, so its built-ins stay out of the library. Moi's All Apps is an editor
+        // and deliberately keeps them in view, including the ones already in Home.
+        if (!Prefs.moiTheme()) {
+            for (String[] d : SHELF) if (onShelf.contains(d[2])) skip.add(d[2]);
+        }
         skip.addAll(java.util.Arrays.asList(LIVE_TV_APPS));
         skip.add(c.getPackageName());
         skip.addAll(HIDDEN);
@@ -387,6 +420,7 @@ final class HomeApps {
             it.key = pkg;
             it.label = app[1];
             it.tile = appTile(c, null, pkg, 0);
+            it.onShelf = onShelf.contains(pkg);
             items.add(it);
         }
         Collections.sort(items, (a, b) -> a.label.toLowerCase(Locale.ROOT).compareTo(b.label.toLowerCase(Locale.ROOT)));
