@@ -57,20 +57,24 @@ final class Frost {
         return out;
     }
 
-    private static float hash(float x, float y) {
-        x = fract(x * 123.34f);
-        y = fract(y * 456.21f);
-        float d = x * (x + 45.32f) + y * (y + 45.32f);
-        return fract((x + d) * (y + d));
+    // The shader's exact lattice hash (see noise in Shaders): whole numbers under 2^24, exact in float.
+    private static float m289(float x) {
+        return x - (float) Math.floor((x + 0.5f) * (1f / 289f)) * 289f;
+    }
+
+    private static float perm(float x) {
+        return m289((x * 34 + 1) * x);
     }
 
     private static float noise(float x, float y) {
         float ix = (float) Math.floor(x), iy = (float) Math.floor(y);
         float fx = x - ix, fy = y - iy;
         float ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
-        float a = hash(ix, iy), b = hash(ix + 1, iy), c = hash(ix, iy + 1), d = hash(ix + 1, iy + 1);
+        float x0 = m289(ix), y0 = m289(iy), x1 = m289(x0 + 1), y1 = m289(y0 + 1);
+        float px0 = perm(x0), px1 = perm(x1);
+        float a = perm(perm(px0 + y0)), b = perm(perm(px1 + y0)), c = perm(perm(px0 + y1)), d = perm(perm(px1 + y1));
         float top = a + (b - a) * ux, bottom = c + (d - c) * ux;
-        return top + (bottom - top) * uy;
+        return (top + (bottom - top) * uy) * (1f / 288f);
     }
 
     private static float fbm2(float x, float y) {
@@ -85,9 +89,5 @@ final class Frost {
     private static float smoothstep(float e0, float e1, float x) {
         float t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
         return t * t * (3 - 2 * t);
-    }
-
-    private static float fract(float v) {
-        return v - (float) Math.floor(v);
     }
 }

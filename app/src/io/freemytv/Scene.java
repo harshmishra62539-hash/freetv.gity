@@ -11,8 +11,8 @@ import android.graphics.RuntimeShader;
 import android.graphics.Shader;
 
 /**
- * Background (aurora) and glass, using the shaders in Shaders. The aurora is drawn into a ¼-scale layer, scaled up,
- * and only redrawn when it moves (advance, up to ~30 times per second); in the frames between steps the GPU just
+ * Background (aurora) and glass, using the shaders in Shaders. The aurora is drawn into a ½-scale layer, scaled up,
+ * and only redrawn when it moves (advance, about 10 times per second); in the frames between steps the GPU just
  * reuses the layer. The glass reads the frosted aurora computed in Frost or, with a recommendation's image as the
  * background, its blurred version (setFrost).
  * If AGSL fails (it shouldn't on Android 13+), it falls back to a gradient and plain translucent glass: the home screen
@@ -33,7 +33,8 @@ final class Scene {
     private final Paint flatRim = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint fallback = new Paint();
     private final Recording auroraNode = Recording.create("aurora");
-    // The layer is drawn at a quarter size and scaled up: filtered, its soft shapes stay soft instead of stepping.
+    // The layer is drawn at half size and scaled up, filtered: on a 4K TV that upscales the UI 2x, a quarter made each
+    // layer pixel and its dither 8×8 panel pixels.
     private final Paint layerPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private int w = 1, h = 1, lw = 1, lh = 1;
     private float speed = 1, baseDim, dim, time;
@@ -75,6 +76,7 @@ final class Scene {
             liquid = null;
         }
         auroraNode.setUseCompositingLayer(true, layerPaint);
+        fallback.setDither(true);   // the flat gradient bands on a big screen otherwise
         flatRim.setStyle(Paint.Style.STROKE);
         flatRim.setColor(0x33FFFFFF);
         flatRim.setStrokeWidth(1.5f);
@@ -87,8 +89,8 @@ final class Scene {
     void setSize(int width, int height) {
         w = Math.max(1, width);
         h = Math.max(1, height);
-        lw = Math.max(1, Math.round(w / 4f));
-        lh = Math.max(1, Math.round(h / 4f));
+        lw = Math.max(1, Math.round(w / 2f));
+        lh = Math.max(1, Math.round(h / 2f));
         auroraNode.setPosition(0, 0, lw, lh);
         if (glass == null) {
             // The sheen fades over a fixed height from each glass's top edge, drawn with a translate: a local matrix

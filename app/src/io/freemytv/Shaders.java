@@ -18,20 +18,31 @@ final class Shaders {
         "uniform half3 c0;\n" +              // palette: background, middle and highlight
         "uniform half3 c1;\n" +
         "uniform half3 c2;\n" +
-        "float hash(float2 p) {\n" +
+        // Per-pixel grain for dithering only: tiny rounding differences change its output completely.
+        "float grain(float2 p) {\n" +
         "  p = fract(p * float2(123.34, 456.21));\n" +
         "  p += dot(p, p + 45.32);\n" +
         "  return fract(p.x * p.y);\n" +
         "}\n" +
+        // The noise's corner values come from whole numbers kept under 2^24, so every step is exact in float and
+        // two neighboring cells always agree on the corner they share. With grain there, one rounding step gave
+        // another value, and the GPU's compiler rounds grain(i + 1) differently from grain(floor(p)): the aurora
+        // broke into hard-edged facets and seams, which the scaled-up layer turned into stair-steps.
+        // m289: whole x mod 289; the +0.5 keeps the division away from whole numbers, where rounding could flip floor.
+        "float m289(float x) { return x - floor((x + 0.5) * (1.0 / 289.0)) * 289.0; }\n" +
+        "float perm(float x) { return m289((x * 34.0 + 1.0) * x); }\n" +
         "float noise(float2 p) {\n" +
         "  float2 i = floor(p);\n" +
-        "  float2 f = fract(p);\n" +
+        "  float2 f = p - i;\n" +
         "  float2 u = f * f * (3.0 - 2.0 * f);\n" +
-        "  float a = hash(i);\n" +
-        "  float b = hash(i + float2(1.0, 0.0));\n" +
-        "  float c = hash(i + float2(0.0, 1.0));\n" +
-        "  float d = hash(i + float2(1.0, 1.0));\n" +
-        "  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);\n" +
+        "  float x0 = m289(i.x), y0 = m289(i.y);\n" +
+        "  float x1 = m289(x0 + 1.0), y1 = m289(y0 + 1.0);\n" +
+        "  float px0 = perm(x0), px1 = perm(x1);\n" +
+        "  float a = perm(perm(px0 + y0));\n" +
+        "  float b = perm(perm(px1 + y0));\n" +
+        "  float c = perm(perm(px0 + y1));\n" +
+        "  float d = perm(perm(px1 + y1));\n" +
+        "  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * (1.0 / 288.0);\n" +
         "}\n" +
         "float fbm2(float2 p) {\n" +
         "  return 0.6 * noise(p) + 0.3 * noise(p * 2.03 + 17.0);\n" +
@@ -65,13 +76,13 @@ final class Shaders {
         "}\n";
 
     /**
-     * Background: drawn into a small layer (¼ scale) and scaled up; gradients lose nothing. Noise of ±½ a color level
+     * Background: drawn into a small layer (½ scale) and scaled up; gradients lose nothing. Noise of ±½ a color level
      * breaks up the banding a dark gradient would show on a big screen.
      */
     static final String AURORA = COMMON +
         "uniform float2 layer;\n" +
         "half4 main(float2 xy) {\n" +
-        "  half3 col = aurora(xy / layer, 1.0) + (hash(xy) - 0.5) / 255.0;\n" +
+        "  half3 col = aurora(xy / layer, 1.0) + (grain(xy) - 0.5) / 255.0;\n" +
         "  return half4(col, 1.0);\n" +
         "}\n";
 
